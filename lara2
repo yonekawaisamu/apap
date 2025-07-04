@@ -1,0 +1,25 @@
+// app/Logging/Processors/CustomPsrLogMessageProcessor.php
+
+namespace App\Logging\Processors;
+
+use Monolog\Processor\PsrLogMessageProcessor;
+
+class CustomPsrLogMessageProcessor extends PsrLogMessageProcessor
+{
+    public function __invoke(array $record): array
+    {
+        // まずは親の処理で {placeholder} を置換
+        $record = parent::__invoke($record);
+
+        // ここに追加処理を書く（例: 全てのcontextをextraにもコピー）
+        if (isset($record['context']) && is_array($record['context'])) {
+            foreach ($record['context'] as $key => $value) {
+                if (!isset($record['extra'][$key])) {
+                    $record['extra'][$key] = $value;
+                }
+            }
+        }
+
+        return $record;
+    }
+}
