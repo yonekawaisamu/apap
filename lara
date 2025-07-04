@@ -1,0 +1,169 @@
+了解しました！
+では、Laravel 側は JSONログに request_id や log_type を extra に保持する形のまま、CloudWatch Logs Insights 側で json() 関数を使って値を取り出す構成で進めましょう。
+
+⸻
+
+✅ 方針：extra.log_type / extra.request_id を保持したまま使う
+
+項目	内容
+Laravelバージョン	Laravel 12
+ログ出力先	php://stdout / php://stderr（Fargate等でCloudWatchへ転送）
+ログ形式	JSON形式（Monolog JsonFormatter）
+追加項目	request_id, log_type → extra に追加
+CloudWatch対応	Logs Insights の json() 関数で抽出して検索可能
+
+
+⸻
+
+✅ 実装内容
+
+⸻
+
+✅ ① ミドルウェア：リクエストIDを発行
+
+📁 app/Http/Middleware/RequestIdMiddleware.php
+
+namespace App\Http\Middleware;
+
+use Closure;
+use Illuminate\Support\Str;
+
+class RequestIdMiddleware
+{
+    public function handle($request, Closure $next)
+    {
+        $requestId = $request->header('X-Request-ID') ?? (string) Str::uuid();
+        app()->instance('request_id', $requestId);
+
+        $response = $next($request);
+        $response->headers->set('X-Request-ID', $requestId);
+
+        return $response;
+    }
+}
+
+📌 登録：app/Http/Kernel.php
+
+protected $middleware = [
+    \App\Http\Middleware\RequestIdMiddleware::class,
+];
+
+
+⸻
+
+✅ ② Processor：extra に追加
+
+📁 app/Logging/AddRequestIdAndTypeProcessor.php
+
+namespace App\Logging;
+
+class AddRequestIdAndTypeProcessor
+{
+    public function __invoke(array $record)
+    {
+        $record['extra']['request_id'] = app()->bound('request_id') ? app('request_id') : null;
+        $record['extra']['log_type'] = $this->determineLogType($record);
+        return $record;
+    }
+
+    protected function determineLogType(array $record): string
+    {
+        if ($record['level'] >= 400 || isset($record['context']['exception'])) {
+            return 'system';
+        }
+        return 'operation';
+    }
+}
+
+
+⸻
+
+✅ ③ ログチャンネル設定（config/logging.php）
+
+✅ stdout_json（操作ログなど）
+
+'stdout_json' => [
+    'driver' => 'monolog',
+    'handler' => Monolog\Handler\StreamHandler::class,
+    'with' => ['stream' => 'php://stdout'],
+    'formatter' => Monolog\Formatter\JsonFormatter::class,
+    'formatter_with' => ['include_stacktraces' => false],
+    'processors' => [App\Logging\AddRequestIdAndTypeProcessor::class],
+],
+
+✅ stderr_json（エラー・例外）
+
+'stderr_json' => [
+    'driver' => 'monolog',
+    'handler' => Monolog\Handler\StreamHandler::class,
+    'with' => ['stream' => 'php://stderr'],
+    'formatter' => Monolog\Formatter\JsonFormatter::class,
+    'formatter_with' => ['include_stacktraces' => true],
+    'processors' => [App\Logging\AddRequestIdAndTypeProcessor::class],
+],
+
+
+⸻
+
+✅ ④ ログ出力例
+
+// 操作ログ
+Log::channel('stdout_json')->info('ユーザーがダウンロード操作を実行', [
+    'user_id' => Auth::id(),
+]);
+
+// エラー
+try {
+    throw new \RuntimeException('内部エラー');
+} catch (\Throwable $e) {
+    Log::channel('stderr_json')->error('例外発生', ['exception' => $e]);
+}
+
+
+⸻
+
+✅ CloudWatch Logs Insights クエリ例
+
+🔍 log_type でフィルタ（operation / system）
+
+fields @timestamp, @message, json(@message, 'extra.log_type') as log_type
+| filter log_type = "operation"
+| sort @timestamp desc
+| limit 50
+
+
+⸻
+
+🔍 request_id で追跡
+
+fields @timestamp, json(@message, 'extra.request_id') as request_id, @message
+| filter request_id = "abc-123"
+| sort @timestamp asc
+
+
+⸻
+
+🔍 user_id を抽出して一覧表示
+
+fields @timestamp, json(@message, 'context.user_id') as user_id, @message
+| filter user_id != ""
+| sort @timestamp desc
+
+
+⸻
+
+✅ 最終まとめ
+
+対応項目	状況
+Laravelバージョン	✅ Laravel 12
+ログ形式	✅ JSON
+ログ出力先	✅ stdout / stderr（CloudWatchが自動収集）
+request_id	✅ ミドルウェアで発行、extraに追加
+log_type	✅ Processorで自動判別し、extraに追加
+CloudWatch対応	✅ json() 関数でネストデータ抽出可能
+ログクエリ	✅ Logs Insights で log_type / request_id による検索可能
+
+
+⸻
+
+必要であれば、さらに user_id / ip_address / route なども付加できますので、ご相談ください！
